@@ -190,7 +190,13 @@ def build_app() -> Starlette:
 
 def main() -> None:
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(build_app(), host="0.0.0.0", port=port)
+    # Force a single worker: Heroku's Python buildpack sets WEB_CONCURRENCY from
+    # detected memory/cores, and uvicorn auto-reads it, but passing >1 workers to
+    # uvicorn.run() requires the app as an import string (it crashes here otherwise).
+    # One worker is also the right fit for this service: each request already
+    # delegates the heavy build123d/OpenCASCADE work to its own subprocess, so extra
+    # worker processes would only multiply resident memory for no throughput gain.
+    uvicorn.run(build_app(), host="0.0.0.0", port=port, workers=1)
 
 
 if __name__ == "__main__":
