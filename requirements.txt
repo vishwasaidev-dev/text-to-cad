@@ -1,0 +1,6 @@
+mcp
+starlette
+uvicorn
+build123d
+cadquery-ocp
+-e ./packages/cadpy
