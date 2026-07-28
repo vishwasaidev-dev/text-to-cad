@@ -10,6 +10,7 @@ from typing import Any
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -23,7 +24,15 @@ INSPECT_SKILL_DIR = REPO_ROOT / "skills" / "cad" / "scripts" / "inspect"
 SUBPROCESS_TIMEOUT_SECONDS = 90
 OUTPUT_TAIL_CHARS = 8000
 
-mcp = FastMCP("cad-mcp")
+# FastMCP defaults to DNS-rebinding Host-header checks scoped to localhost, which
+# 421s every request once this runs behind a real hostname (Heroku). That
+# protection targets browser-based attacks against locally-bound dev servers;
+# it's not relevant here since every request already has to pass the Bearer
+# auth check below and nothing renders this service in a browser.
+mcp = FastMCP(
+    "cad-mcp",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 def _safe_name(name: str) -> str:
