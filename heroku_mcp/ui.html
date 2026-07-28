@@ -1,0 +1,428 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cad-mcp — Shape Generator</title>
+<style>
+  :root {
+    --bg: #14171a; --bg-2: #191d21; --panel: #1b1f23; --panel-border: rgba(255,255,255,0.09);
+    --line: rgba(255,255,255,0.08); --text: #e9e6df; --text-muted: #8b929a; --text-faint: #565c62;
+    --accent: #d29a54; --accent-dim: #8a6636; --ok: #7fb37a; --err: #cf6a4f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, "Segoe UI", system-ui, -apple-system, sans-serif; }
+  body { display: grid; grid-template-columns: 360px 1fr; height: 100vh; overflow: hidden; }
+
+  .panel { background: var(--panel); border-right: 1px solid var(--panel-border); overflow-y: auto; padding: 20px; }
+  .eyebrow { font: 600 11px/1 ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin: 0 0 6px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .sub { font-size: 12.5px; color: var(--text-muted); margin: 0 0 18px; line-height: 1.5; }
+
+  label { display: block; font-size: 12.5px; color: var(--text-muted); margin: 14px 0 5px; }
+  label.first { margin-top: 0; }
+  input[type="text"], input[type="number"], input[type="password"], textarea, select {
+    width: 100%; background: #101315; border: 1px solid var(--panel-border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px; font-size: 13.5px; font-family: inherit;
+  }
+  textarea { font-family: ui-monospace, monospace; font-size: 12.5px; min-height: 90px; resize: vertical; }
+  input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .checkbox-row input { width: auto; accent-color: var(--accent); }
+  .checkbox-row label { margin: 0; color: var(--text); font-size: 13px; }
+
+  .field-hint { font-size: 11px; color: var(--text-faint); margin-top: 3px; }
+
+  button.generate {
+    width: 100%; margin-top: 20px; padding: 11px; border-radius: 8px; border: none;
+    background: var(--accent); color: #14171a; font-weight: 700; font-size: 14px; cursor: pointer;
+  }
+  button.generate:disabled { opacity: 0.5; cursor: default; }
+  button.generate:hover:not(:disabled) { filter: brightness(1.08); }
+
+  .status { margin-top: 12px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); font-family: ui-monospace, monospace; font-size: 11.5px; }
+
+  .downloads { display: flex; gap: 8px; margin-top: 12px; }
+  .downloads a {
+    flex: 1; text-align: center; padding: 8px; border-radius: 6px; border: 1px solid var(--accent-dim);
+    color: var(--accent); text-decoration: none; font-size: 12.5px; font-weight: 600;
+  }
+  .downloads a:hover { background: rgba(210,154,84,0.1); }
+
+  .auth-gate {
+    position: fixed; inset: 0; background: rgba(10,12,14,0.92); display: flex; align-items: center;
+    justify-content: center; z-index: 10; backdrop-filter: blur(6px);
+  }
+  .auth-box { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px;
+    padding: 24px; width: 320px; }
+  .auth-box h2 { margin: 0 0 4px; font-size: 15px; }
+  .auth-box p { margin: 0 0 14px; font-size: 12.5px; color: var(--text-muted); }
+  .auth-box button { width: 100%; margin-top: 10px; padding: 9px; border-radius: 6px; border: none;
+    background: var(--accent); color: #14171a; font-weight: 700; cursor: pointer; }
+
+  #gl { width: 100%; height: 100%; display: block; cursor: grab;
+    background: radial-gradient(ellipse at 50% 40%, var(--bg-2) 0%, var(--bg) 70%); }
+  #gl:active { cursor: grabbing; }
+  .viewer-hint { position: fixed; bottom: 16px; right: 22px;
+    font: 500 11px/1 ui-monospace, monospace; color: var(--text-faint); }
+  .empty-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-faint); font-size: 13px; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div class="auth-gate" id="authGate">
+  <div class="auth-box">
+    <h2>cad-mcp shape generator</h2>
+    <p>Enter the server's Bearer token (same one used in <code>.mcp.json</code>) to generate parts.</p>
+    <input type="password" id="tokenInput" placeholder="MCP_AUTH_TOKEN">
+    <button onclick="saveToken()">Continue</button>
+  </div>
+</div>
+
+<div class="panel">
+  <p class="eyebrow">cad-mcp-aidev-0721</p>
+  <h1>Parametric shape generator</h1>
+  <p class="sub">No-LLM: pick a shape, fill in numbers, generate a real STEP/STL file. Every value is a plain number/checkbox — no free-form code ever runs from this form.</p>
+
+  <label class="first">Shape</label>
+  <select id="shapeSelect" onchange="renderForm()"></select>
+
+  <div id="paramFields"></div>
+
+  <label class="first">Filename</label>
+  <input type="text" id="filenameInput" value="part">
+  <div class="checkbox-row">
+    <input type="checkbox" id="stlCheck" checked>
+    <label for="stlCheck">Also export STL</label>
+  </div>
+
+  <button class="generate" id="generateBtn" onclick="generate()">Generate</button>
+  <div class="status" id="status"></div>
+  <div class="downloads" id="downloads" style="display:none">
+    <a id="dlStep" download>Download .step</a>
+    <a id="dlStl" download style="display:none">Download .stl</a>
+  </div>
+</div>
+
+<div style="position:relative">
+  <canvas id="gl"></canvas>
+  <div class="empty-state" id="emptyState">Generate a shape to preview it here</div>
+  <div class="viewer-hint">drag orbit · scroll zoom</div>
+</div>
+
+<script>
+"use strict";
+const SCHEMA = __SCHEMA_JSON__;
+
+let authToken = sessionStorage.getItem("cadmcp_token") || "";
+function saveToken() {
+  authToken = document.getElementById("tokenInput").value.trim();
+  if (!authToken) return;
+  sessionStorage.setItem("cadmcp_token", authToken);
+  document.getElementById("authGate").style.display = "none";
+}
+if (authToken) document.getElementById("authGate").style.display = "none";
+
+// ---- form ----
+const shapeSelect = document.getElementById("shapeSelect");
+for (const key of Object.keys(SCHEMA)) {
+  const opt = document.createElement("option");
+  opt.value = key;
+  opt.textContent = SCHEMA[key].label;
+  shapeSelect.appendChild(opt);
+}
+
+function renderForm() {
+  const shape = shapeSelect.value;
+  const container = document.getElementById("paramFields");
+  container.innerHTML = "";
+  const params = SCHEMA[shape].params;
+  for (const [name, [label, kind, def]] of Object.entries(params)) {
+    const wrap = document.createElement("div");
+    if (kind === "bool") {
+      wrap.className = "checkbox-row";
+      wrap.innerHTML = `<input type="checkbox" id="p_${name}" ${def ? "checked" : ""}><label for="p_${name}">${label}</label>`;
+    } else if (kind === "points") {
+      wrap.innerHTML = `<label>${label}</label><textarea id="p_${name}">${def}</textarea>`;
+    } else {
+      const [, , , lo, hi, step] = params[name];
+      wrap.innerHTML = `<label>${label}</label><input type="number" id="p_${name}" value="${def}" min="${lo ?? ""}" max="${hi ?? ""}" step="${step ?? "any"}">`;
+    }
+    container.appendChild(wrap);
+  }
+}
+renderForm();
+
+function collectParams(shape) {
+  const params = SCHEMA[shape].params;
+  const out = {};
+  for (const [name, [, kind]] of Object.entries(params)) {
+    const el = document.getElementById(`p_${name}`);
+    if (kind === "bool") out[name] = el.checked;
+    else if (kind === "points") out[name] = el.value;
+    else out[name] = parseFloat(el.value);
+  }
+  return out;
+}
+
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function base64ToBlob(b64, mime) {
+  return new Blob([base64ToArrayBuffer(b64)], { type: mime });
+}
+
+async function generate() {
+  if (!authToken) { document.getElementById("authGate").style.display = "flex"; return; }
+  const shape = shapeSelect.value;
+  const filename = document.getElementById("filenameInput").value.trim() || "part";
+  const stl = document.getElementById("stlCheck").checked;
+  const statusEl = document.getElementById("status");
+  const btn = document.getElementById("generateBtn");
+  const downloads = document.getElementById("downloads");
+  downloads.style.display = "none";
+  statusEl.className = "status";
+  statusEl.textContent = "Generating…";
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/generate-shape", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ shape, params: collectParams(shape), filename, stl }),
+    });
+    if (resp.status === 401) {
+      sessionStorage.removeItem("cadmcp_token");
+      authToken = "";
+      document.getElementById("authGate").style.display = "flex";
+      statusEl.textContent = "";
+      return;
+    }
+    const data = await resp.json();
+    if (!data.ok) {
+      statusEl.className = "status err";
+      statusEl.textContent = (data.error || "Generation failed") + "\n\n" + (data.stderr || "").slice(-1500);
+      return;
+    }
+    statusEl.className = "status ok";
+    statusEl.textContent = "Generated " + filename + ".step" + (data.stl_base64 ? " + .stl" : "");
+
+    const stepBlob = base64ToBlob(data.step_base64, "application/step");
+    const dlStep = document.getElementById("dlStep");
+    dlStep.href = URL.createObjectURL(stepBlob);
+    dlStep.download = filename + ".step";
+
+    const dlStl = document.getElementById("dlStl");
+    if (data.stl_base64) {
+      const stlBlob = base64ToBlob(data.stl_base64, "model/stl");
+      dlStl.href = URL.createObjectURL(stlBlob);
+      dlStl.download = filename + ".stl";
+      dlStl.style.display = "block";
+      loadPreview(base64ToArrayBuffer(data.stl_base64));
+    } else {
+      dlStl.style.display = "none";
+    }
+    downloads.style.display = "flex";
+  } catch (err) {
+    statusEl.className = "status err";
+    statusEl.textContent = String(err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---- minimal WebGL STL preview (single part, orbit + zoom) ----
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl", { antialias: true, alpha: false });
+const emptyState = document.getElementById("emptyState");
+
+function parseBinarySTL(buf) {
+  const dv = new DataView(buf);
+  const triCount = dv.getUint32(80, true);
+  const positions = new Float32Array(triCount * 9);
+  const normals = new Float32Array(triCount * 9);
+  let offset = 84;
+  for (let i = 0; i < triCount; i++) {
+    const nx = dv.getFloat32(offset, true), ny = dv.getFloat32(offset + 4, true), nz = dv.getFloat32(offset + 8, true);
+    for (let v = 0; v < 3; v++) {
+      const vOff = offset + 12 + v * 12;
+      const base = (i * 3 + v) * 3;
+      positions[base] = dv.getFloat32(vOff, true);
+      positions[base + 1] = dv.getFloat32(vOff + 4, true);
+      positions[base + 2] = dv.getFloat32(vOff + 8, true);
+      normals[base] = nx; normals[base + 1] = ny; normals[base + 2] = nz;
+    }
+    offset += 50;
+  }
+  return { positions, normals, triCount };
+}
+
+const mat4 = {
+  create() { return new Float32Array(16); },
+  identity(o) { o.fill(0); o[0]=o[5]=o[10]=o[15]=1; return o; },
+  perspective(o, fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2);
+    o.fill(0); o[0] = f / aspect; o[5] = f;
+    o[10] = (far + near) / (near - far); o[11] = -1;
+    o[14] = (2 * far * near) / (near - far);
+    return o;
+  },
+  lookAt(o, eye, center, up) {
+    const z = normalize(sub(eye, center));
+    const x = normalize(cross(up, z));
+    const y = cross(z, x);
+    o[0]=x[0]; o[4]=x[1]; o[8]=x[2]; o[12]=-dot(x,eye);
+    o[1]=y[0]; o[5]=y[1]; o[9]=y[2]; o[13]=-dot(y,eye);
+    o[2]=z[0]; o[6]=z[1]; o[10]=z[2]; o[14]=-dot(z,eye);
+    o[3]=0; o[7]=0; o[11]=0; o[15]=1;
+    return o;
+  },
+  normalFromMat4(o3, m) {
+    o3[0]=m[0]; o3[1]=m[1]; o3[2]=m[2]; o3[3]=m[4]; o3[4]=m[5]; o3[5]=m[6]; o3[6]=m[8]; o3[7]=m[9]; o3[8]=m[10];
+    return o3;
+  }
+};
+function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function length(a){return Math.sqrt(dot(a,a));}
+function normalize(a){const l=length(a)||1;return [a[0]/l,a[1]/l,a[2]/l];}
+
+const vsSource = `
+  attribute vec3 aPosition; attribute vec3 aNormal;
+  uniform mat4 uView; uniform mat4 uProj; uniform mat3 uNormalMatrix;
+  varying vec3 vNormal; varying vec3 vViewPos;
+  void main() {
+    vec4 viewPos = uView * vec4(aPosition, 1.0);
+    vViewPos = viewPos.xyz;
+    vNormal = normalize(uNormalMatrix * aNormal);
+    gl_Position = uProj * viewPos;
+  }`;
+const fsSource = `
+  precision mediump float;
+  varying vec3 vNormal; varying vec3 vViewPos;
+  void main() {
+    vec3 N = normalize(vNormal);
+    if (!gl_FrontFacing) N = -N;
+    vec3 V = normalize(-vViewPos);
+    vec3 L1 = normalize(vec3(0.5, 0.8, 1.0));
+    vec3 L2 = normalize(vec3(-0.6, -0.3, 0.5));
+    float diff1 = max(dot(N, L1), 0.0);
+    float diff2 = max(dot(N, L2), 0.0) * 0.35;
+    vec3 H = normalize(L1 + V);
+    float spec = pow(max(dot(N, H), 0.0), 28.0) * 0.5;
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 2.2) * 0.22;
+    vec3 base = vec3(0.82, 0.65, 0.38);
+    vec3 color = base * (0.3 + diff1 * 0.72 + diff2) + vec3(spec) + vec3(0.8,0.62,0.4) * rim;
+    gl_FragColor = vec4(color, 1.0);
+  }`;
+
+function compile(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const program = gl.createProgram();
+gl.attachShader(program, compile(gl.VERTEX_SHADER, vsSource));
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(program);
+gl.useProgram(program);
+const aPosition = gl.getAttribLocation(program, "aPosition");
+const aNormal = gl.getAttribLocation(program, "aNormal");
+const uView = gl.getUniformLocation(program, "uView");
+const uProj = gl.getUniformLocation(program, "uProj");
+const uNormalMatrix = gl.getUniformLocation(program, "uNormalMatrix");
+gl.enable(gl.DEPTH_TEST);
+gl.clearColor(0.078, 0.09, 0.102, 1.0);
+
+let mesh = null;
+let azimuth = 0.7, elevation = 0.35, distance = 3.2, autoSpin = true;
+let dragging = false, lastX = 0, lastY = 0;
+
+function loadPreview(arrayBuffer) {
+  emptyState.style.display = "none";
+  const { positions, normals, triCount } = parseBinarySTL(arrayBuffer);
+  let minX=Infinity,minY=Infinity,minZ=Infinity,maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    minX=Math.min(minX,positions[i]); maxX=Math.max(maxX,positions[i]);
+    minY=Math.min(minY,positions[i+1]); maxY=Math.max(maxY,positions[i+1]);
+    minZ=Math.min(minZ,positions[i+2]); maxZ=Math.max(maxZ,positions[i+2]);
+  }
+  const cx=(minX+maxX)/2, cy=(minY+maxY)/2, cz=(minZ+maxZ)/2;
+  const extent = Math.max(maxX-minX, maxY-minY, maxZ-minZ) || 1;
+  const scale = 1.6 / extent;
+  for (let i = 0; i < positions.length; i += 3) {
+    positions[i] = (positions[i]-cx)*scale;
+    positions[i+1] = (positions[i+1]-cy)*scale;
+    positions[i+2] = (positions[i+2]-cz)*scale;
+  }
+  const posBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+  const normBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+  mesh = { posBuffer, normBuffer, triCount };
+  autoSpin = true;
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  dragging = true; autoSpin = false; lastX = e.clientX; lastY = e.clientY;
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  azimuth += (e.clientX - lastX) * 0.008;
+  elevation += (e.clientY - lastY) * 0.008;
+  elevation = Math.max(-1.4, Math.min(1.4, elevation));
+  lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener("pointerup", () => { dragging = false; });
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  distance = Math.max(0.8, Math.min(12, distance + e.deltaY * 0.003));
+}, { passive: false });
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + "px"; canvas.style.height = rect.height + "px";
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const view = mat4.create(), proj = mat4.create(), normalMatrix = new Float32Array(9);
+function render() {
+  if (autoSpin) azimuth += 0.0015;
+  if (mesh) {
+    const eye = [Math.sin(azimuth)*Math.cos(elevation)*distance, Math.sin(elevation)*distance, Math.cos(azimuth)*Math.cos(elevation)*distance];
+    mat4.lookAt(view, eye, [0,0,0], [0,1,0]);
+    mat4.perspective(proj, Math.PI/5, canvas.width/canvas.height, 0.05, 100);
+    mat4.normalFromMat4(normalMatrix, view);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.uniformMatrix4fv(uView, false, view);
+    gl.uniformMatrix4fv(uProj, false, proj);
+    gl.uniformMatrix3fv(uNormalMatrix, false, normalMatrix);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.posBuffer);
+    gl.enableVertexAttribArray(aPosition);
+    gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.normBuffer);
+    gl.enableVertexAttribArray(aNormal);
+    gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, mesh.triCount * 3);
+  }
+  requestAnimationFrame(render);
+}
+render();
+</script>
+</body>
+</html>

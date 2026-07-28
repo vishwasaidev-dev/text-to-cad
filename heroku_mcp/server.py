@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -15,14 +16,22 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
+
+import shapes
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STEP_SKILL_DIR = REPO_ROOT / "skills" / "cad" / "scripts" / "step"
 INSPECT_SKILL_DIR = REPO_ROOT / "skills" / "cad" / "scripts" / "inspect"
 SUBPROCESS_TIMEOUT_SECONDS = 90
 OUTPUT_TAIL_CHARS = 8000
+
+_UI_HTML = (
+    (Path(__file__).resolve().parent / "ui.html")
+    .read_text(encoding="utf-8")
+    .replace("__SCHEMA_JSON__", json.dumps(shapes.SCHEMA))
+)
 
 # FastMCP defaults to DNS-rebinding Host-header checks scoped to localhost, which
 # 421s every request once this runs behind a real hostname (Heroku). That
@@ -54,8 +63,7 @@ def _tail(text: str) -> str:
     return text[-OUTPUT_TAIL_CHARS:]
 
 
-@mcp.tool()
-def generate_step(
+def _generate_step_impl(
     source: str,
     filename: str = "part",
     stl: bool = False,
@@ -63,12 +71,10 @@ def generate_step(
     three_mf: bool = False,
 ) -> dict[str, Any]:
     """Compile build123d Python source into a STEP file via the text-to-cad CAD skill's
-    `scripts/step` generator.
-
-    `source` must be a complete build123d Python module that defines `gen_step()`,
-    per the CAD skill conventions (units mm, closed positive-volume solids). Returns
-    the generated files base64-encoded. Set `stl`/`glb`/`three_mf` to also export those
-    secondary sidecars alongside the STEP.
+    `scripts/step` generator. Shared by the generate_step MCP tool and the
+    /api/generate-shape REST endpoint -- same compile path either way, they
+    only differ in how `source` gets built (raw from an MCP client that
+    already knows build123d vs. from shapes.py's fixed templates).
     """
     name = _safe_name(filename)
     with tempfile.TemporaryDirectory(prefix="cadmcp-") as tmp:
@@ -110,6 +116,25 @@ def generate_step(
             if path.exists():
                 response[key] = base64.b64encode(path.read_bytes()).decode("ascii")
         return response
+
+
+@mcp.tool()
+def generate_step(
+    source: str,
+    filename: str = "part",
+    stl: bool = False,
+    glb: bool = False,
+    three_mf: bool = False,
+) -> dict[str, Any]:
+    """Compile build123d Python source into a STEP file via the text-to-cad CAD skill's
+    `scripts/step` generator.
+
+    `source` must be a complete build123d Python module that defines `gen_step()`,
+    per the CAD skill conventions (units mm, closed positive-volume solids). Returns
+    the generated files base64-encoded. Set `stl`/`glb`/`three_mf` to also export those
+    secondary sidecars alongside the STEP.
+    """
+    return _generate_step_impl(source, filename, stl, glb, three_mf)
 
 
 @mcp.tool()
@@ -176,9 +201,16 @@ def _is_authorized(request: Request) -> bool:
     return request.headers.get("authorization") == f"Bearer {expected}"
 
 
+# /ui must be reachable by a plain browser navigation, which can't set a
+# custom Authorization header -- the page itself prompts for the token and
+# sends it on subsequent fetch() calls to /api/generate-shape, which DOES
+# stay behind the auth check like every other route.
+PUBLIC_PATHS = {"/", "/ui"}
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
-        if request.url.path == "/":
+        if request.url.path in PUBLIC_PATHS:
             return await call_next(request)
         if not _is_authorized(request):
             return PlainTextResponse("Unauthorized", status_code=401)
@@ -189,10 +221,40 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "cad-mcp"})
 
 
+async def ui_page(request: Request) -> HTMLResponse:
+    return HTMLResponse(_UI_HTML)
+
+
+async def generate_shape_endpoint(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+
+    shape = body.get("shape")
+    raw_params = body.get("params") or {}
+    filename = body.get("filename") or "part"
+    want_stl = bool(body.get("stl", True))
+
+    try:
+        source = shapes.build_source(shape, raw_params)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001 - report to the UI rather than 500
+        return JSONResponse({"ok": False, "error": f"unexpected error building source: {exc}"}, status_code=400)
+
+    result = _generate_step_impl(source, filename=filename, stl=want_stl)
+    return JSONResponse(result)
+
+
 def build_app() -> Starlette:
     mcp_app = mcp.streamable_http_app()
     app = Starlette(
-        routes=[Route("/", health)],
+        routes=[
+            Route("/", health),
+            Route("/ui", ui_page),
+            Route("/api/generate-shape", generate_shape_endpoint, methods=["POST"]),
+        ],
         middleware=[Middleware(BearerAuthMiddleware)],
         # FastMCP's streamable_http_app() carries its own lifespan (starts the
         # session manager's task group). Mounting it below does NOT run that
