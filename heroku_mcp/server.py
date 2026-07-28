@@ -131,10 +131,17 @@ def inspect_step(
     name = _safe_name(filename)
     with tempfile.TemporaryDirectory(prefix="cadmcp-") as tmp:
         work_dir = Path(tmp)
-        step_path = work_dir / f"{name}.step"
-        step_path.write_bytes(base64.b64decode(step_base64))
+        step_filename = f"{name}.step"
+        (work_dir / step_filename).write_bytes(base64.b64decode(step_base64))
 
-        args = ["refs", step_path.as_posix()]
+        # Pass a cwd-relative filename, not an absolute path. cadpy's cad-path
+        # normalization strips leading path separators for its selector-ref catalog
+        # (normalize_cad_path -> .strip("/")), which is harmless for Windows-style
+        # "C:/..." paths but turns a POSIX absolute path like "/tmp/x/cube.step" into
+        # a bogus relative-looking string, breaking file resolution on Linux. A plain
+        # relative filename resolved against cwd (set below) sidesteps this entirely
+        # and matches the CAD skill's own documented usage.
+        args = ["refs", step_filename]
         if facts:
             args.append("--facts")
         if planes:
