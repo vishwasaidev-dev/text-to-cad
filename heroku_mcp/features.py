@@ -392,22 +392,49 @@ def _feature_lines(var: str, raw: dict, index_label: str) -> list[str]:
     if len(transforms) == 1:
         lines.append(f"    {var} = {transforms[0]} * {var}_base")
     else:
+        # Group pattern instances with Compound, not `+`. A boolean fuse of
+        # many instances is needless work, and it is actively dangerous when
+        # instances happen to touch (a bolt circle whose heads just kiss, a
+        # dense linear array) -- see _body_lines' comment for why a coincident-
+        # face fuse can silently return an EMPTY, still "valid" shape.
         joined = ",\n        ".join(transforms)
         lines.append(f"    {var}_placements = [\n        {joined},\n    ]")
-        lines.append(f"    {var} = None")
-        lines.append(f"    for _t in {var}_placements:")
-        lines.append(f"        _inst = _t * {var}_base")
-        lines.append(f"        {var} = _inst if {var} is None else {var} + _inst")
+        lines.append(f"    {var} = Compound(children=[_t * {var}_base for _t in {var}_placements])")
     return lines
 
 
 def _body_lines(body_var: str, features: list[dict], body_label: str) -> list[str]:
-    """Fold one body's features together into `{body_var}`."""
+    """Fold one body's features together into `{body_var}`.
+
+    ADD features accumulate via Compound, not a boolean fuse (`+`). This
+    matters a lot for real linkage geometry: two arms of a bell-crank sharing
+    one pivot boss is the single most common multi-feature pattern for a
+    lever, and `+`-fusing two solids with an exactly-coincident (or, worse,
+    floating-point-NEARLY-coincident after independent Location transforms)
+    boss face is a known OpenCASCADE boolean-op robustness hole -- it doesn't
+    raise, it just silently returns an empty, still `is_valid` shape. That
+    was caught here empirically: two link features sharing a pivot fused to
+    zero volume with no error at all, so the server reported `ok: True` on
+    an empty STEP. A Compound of untouched solids sidesteps the whole
+    problem (`.volume` still sums correctly, subtract/intersect against it
+    still works -- OCC's Cut/Common accept a compound operand fine, it's
+    specifically same-type Fuse-of-coincident-solids that's fragile), and
+    it's the geometrically correct call anyway -- touching arms at a pivot
+    don't need to be one watertight manifold, they need to occupy the space
+    they occupy.
+
+    SUBTRACT/INTERSECT still use a real boolean (`-`/`&`) -- those need true
+    solid operations, and empty results there raise on their own (cutting a
+    zero-volume tool is a no-op, not a silent full-body wipeout) since the
+    base being cut is generally not near-coincident with the cutting tool.
+    """
     live = [f for f in features if not f.get("suppressed")]
     if not live:
         raise ValueError(f"Body '{body_label}' has no active features")
 
     lines: list[str] = []
+    add_group: list[str] = []          # vars pending Compound-merge into body_var
+    started = False
     for i, raw in enumerate(live):
         var = f"{body_var}_f{i}"
         lines += _feature_lines(var, raw, f"{body_label}.{i}")
@@ -416,11 +443,49 @@ def _body_lines(body_var: str, features: list[dict], body_label: str) -> list[st
             raise ValueError(
                 f"Feature {body_label}.{i}: mode must be add/subtract/intersect, got {mode!r}"
             )
-        if i == 0:
-            lines.append(f"    {body_var} = {var}")
-        else:
-            lines.append(f"    {body_var} = {body_var} {_MODE_OPS[mode]} {var}")
+        if mode == "add":
+            add_group.append(var)
+            continue
+        # A subtract/intersect needs one real solid to operate against --
+        # flush any pending adds into body_var first.
+        if add_group:
+            lines.append(_flush_add_group(body_var, add_group, started))
+            add_group = []
+            started = True
+        lines.append(f"    {body_var} = {body_var} {_MODE_OPS[mode]} {var}")
+        started = True
+    if add_group:
+        lines.append(_flush_add_group(body_var, add_group, started))
     return lines
+
+
+def _flush_add_group(body_var: str, add_vars: list[str], started: bool) -> str:
+    # _flat() flattens one level so this never nests a Compound inside a
+    # Compound: build123d's `.volume` only sums DIRECT children, so
+    # Compound(children=[Compound(...), x]) reads volume=0 even though
+    # .solids() still (correctly) lists every solid -- a silent, `is_valid`
+    # -true, wrong-answer trap. body_var may already be a Compound from an
+    # earlier flush, and any add var may already be one from a patterned
+    # feature, so both sides need flattening, not just one.
+    names = add_vars if not started else [body_var, *add_vars]
+    joined = " + ".join(f"_flat({n})" for n in names)
+    return f"    {body_var} = Compound(children={joined})"
+
+
+def _flat_helper_source() -> str:
+    # NOT an isinstance(x, Compound) check -- build123d's own `Part`/`Solid`
+    # classes are themselves Compound subclasses (isinstance is True for a
+    # single leaf solid too), and a leaf's `.children` is an empty list, not
+    # itself. That combination silently emptied every single-feature body
+    # the first time this helper was tried (Compound(children=[]) from a
+    # leaf misidentified as an already-flat container). `.solids()` has no
+    # such trap: it recurses to the real leaf solids regardless of nesting
+    # depth, correctly returning `[x]` for a leaf and the full flat list for
+    # any depth of Compound-of-Compounds.
+    return '''
+def _flat(x):
+    return list(x.solids())
+'''
 
 
 _PREAMBLE = '''
@@ -433,7 +498,7 @@ from build123d import (
 
 
 def _module(body: str) -> str:
-    return f"{_PREAMBLE}{_soften_helper_source()}\n\ndef gen_step():\n{body}\n"
+    return f"{_PREAMBLE}{_soften_helper_source()}{_flat_helper_source()}\n\ndef gen_step():\n{body}\n"
 
 
 def compose_source(raw_features: list[dict]) -> str:
@@ -511,7 +576,7 @@ def compose_multibody_runner(bodies: list[dict], assembly_name: str) -> tuple[st
     source = f'''{_PREAMBLE}
 import json, traceback
 from build123d import export_step, export_stl
-{_soften_helper_source()}
+{_soften_helper_source()}{_flat_helper_source()}
 
 _manifest = {{"bodies": [], "assembly": None}}
 
@@ -540,7 +605,7 @@ def build():
 {body}
 {exports}
     try:
-        export_step(Compound(children=[{", ".join(body_vars)}]), "{asm}.step")
+        export_step(Compound(children=[c for v in [{", ".join(body_vars)}] for c in _flat(v)]), "{asm}.step")
         _manifest["assembly"] = "{asm}.step"
     except Exception as exc:
         _manifest["assembly_error"] = str(exc)
@@ -586,5 +651,5 @@ def compose_assembly_source(bodies: list[dict]) -> str:
     if not body_vars:
         raise ValueError("Every body is empty or suppressed -- nothing to build")
 
-    lines.append(f"    result = Compound(children=[{', '.join(body_vars)}])")
+    lines.append(f"    result = Compound(children=[c for v in [{', '.join(body_vars)}] for c in _flat(v)])")
     return _module("\n".join(lines) + "\n    return result")
