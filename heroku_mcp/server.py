@@ -237,17 +237,25 @@ async def builder_page(request: Request) -> HTMLResponse:
 
 
 async def generate_assembly_endpoint(request: Request) -> JSONResponse:
+    """Build a model from the feature-tree builder.
+
+    Accepts either the original flat single-body payload (`{"features": [...]}`)
+    or a multi-body assembly (`{"bodies": [{"name", "color", "features"}, ...]}`).
+    """
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
 
-    raw_features = body.get("features") or []
     filename = body.get("filename") or "assembly"
     want_stl = bool(body.get("stl", True))
+    raw_bodies = body.get("bodies")
+
+    if raw_bodies:
+        return JSONResponse(_generate_multibody(raw_bodies, filename, want_stl))
 
     try:
-        source = features.compose_source(raw_features)
+        source = features.compose_source(body.get("features") or [])
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except Exception as exc:  # noqa: BLE001 - report to the UI rather than 500
@@ -255,6 +263,109 @@ async def generate_assembly_endpoint(request: Request) -> JSONResponse:
 
     result = _generate_step_impl(source, filename=filename, stl=want_stl)
     return JSONResponse(result)
+
+
+MANIFEST_MARKER = "__CADMCP_MANIFEST__"
+
+
+def _generate_multibody(raw_bodies: list, filename: str, want_stl: bool) -> dict[str, Any]:
+    """Build every body in ONE subprocess and return per-body STEP+STL plus a
+    combined assembly STEP.
+
+    Deliberately bypasses the CAD skill's `scripts/step` CLI, which handles
+    exactly one gen_step() per invocation. Nearly all of a run's wall time is
+    interpreter + OpenCASCADE import rather than geometry, so paying it once
+    per body made a 4-body model exceed Heroku's 30s router timeout. The
+    source being run here is machine-generated from already-validated
+    numeric params (never user text), so the CLI's source validation isn't
+    load-bearing on this path -- the MCP `generate_step` tool, which does
+    accept arbitrary submitted source, still goes through the CLI.
+    """
+    active = [
+        b for b in raw_bodies
+        if not b.get("suppressed")
+        and [f for f in (b.get("features") or []) if not f.get("suppressed")]
+    ]
+    if not active:
+        return {"ok": False, "error": "Every body is empty or suppressed -- nothing to build"}
+
+    try:
+        source, safe_names = features.compose_multibody_runner(active, _safe_name(filename))
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"unexpected error building source: {exc}"}
+
+    with tempfile.TemporaryDirectory(prefix="cadmcp-asm-") as tmp:
+        work_dir = Path(tmp)
+        script = work_dir / "build_model.py"
+        script.write_text(source, encoding="utf-8")
+
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script)],
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "error": f"model build timed out after {SUBPROCESS_TIMEOUT_SECONDS}s",
+                "stderr": _tail(exc.stderr or ""),
+            }
+
+        manifest: dict[str, Any] = {}
+        for line in (result.stdout or "").splitlines():
+            if line.startswith(MANIFEST_MARKER):
+                try:
+                    manifest = json.loads(line[len(MANIFEST_MARKER):])
+                except json.JSONDecodeError:
+                    manifest = {}
+                break
+
+        if not manifest:
+            return {
+                "ok": False,
+                "error": "model build produced no result manifest",
+                "stdout": _tail(result.stdout or ""),
+                "stderr": _tail(result.stderr or ""),
+            }
+        if manifest.get("fatal"):
+            return {"ok": False, "error": "model build failed", "stderr": _tail(manifest["fatal"])}
+
+        by_name = {e["name"]: e for e in manifest.get("bodies", [])}
+        out_bodies: list[dict[str, Any]] = []
+        for raw_body, safe in zip(active, safe_names):
+            entry: dict[str, Any] = {
+                "name": str(raw_body.get("name") or safe),
+                "color": raw_body.get("color"),
+            }
+            built = by_name.get(safe, {})
+            step_path, stl_path = work_dir / f"{safe}.step", work_dir / f"{safe}.stl"
+            if step_path.exists():
+                entry["step_base64"] = base64.b64encode(step_path.read_bytes()).decode("ascii")
+            if want_stl and stl_path.exists():
+                entry["stl_base64"] = base64.b64encode(stl_path.read_bytes()).decode("ascii")
+            entry["ok"] = "step_base64" in entry
+            entry["error"] = built.get("error") if not entry["ok"] else None
+            out_bodies.append(entry)
+
+        response: dict[str, Any] = {"ok": any(b["ok"] for b in out_bodies), "bodies": out_bodies}
+        if not response["ok"]:
+            response["error"] = next(
+                (b["error"] for b in out_bodies if b.get("error")), "all bodies failed to build"
+            )
+            response["stderr"] = _tail(result.stderr or "")
+            return response
+
+        asm_path = work_dir / f"{_safe_name(filename)}.step"
+        if manifest.get("assembly") and asm_path.exists():
+            response["assembly_step_base64"] = base64.b64encode(asm_path.read_bytes()).decode("ascii")
+        elif manifest.get("assembly_error"):
+            response["assembly_error"] = manifest["assembly_error"]
+        return response
 
 
 async def generate_shape_endpoint(request: Request) -> JSONResponse:
