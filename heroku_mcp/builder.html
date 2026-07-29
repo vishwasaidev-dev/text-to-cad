@@ -1,0 +1,650 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cad-mcp — Feature-Tree Builder</title>
+<style>
+  :root {
+    --bg: #14171a; --bg-2: #191d21; --panel: #1b1f23; --panel-border: rgba(255,255,255,0.09);
+    --line: rgba(255,255,255,0.08); --text: #e9e6df; --text-muted: #8b929a; --text-faint: #565c62;
+    --accent: #d29a54; --accent-dim: #8a6636; --ok: #7fb37a; --err: #cf6a4f; --sub: #6ea0c9;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, "Segoe UI", system-ui, -apple-system, sans-serif; }
+  body { display: grid; grid-template-columns: 380px 1fr; height: 100vh; overflow: hidden; }
+
+  .panel { background: var(--panel); border-right: 1px solid var(--panel-border); overflow-y: auto; padding: 18px; }
+  .eyebrow { font: 600 11px/1 ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin: 0 0 6px; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: var(--text-muted); margin: 0 0 16px; line-height: 1.5; }
+  a.simple-link { color: var(--sub); font-size: 11.5px; }
+
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint);
+    margin: 20px 0 8px; border-top: 1px solid var(--line); padding-top: 16px; }
+  h2.first { border-top: none; padding-top: 0; margin-top: 0; }
+
+  label { display: block; font-size: 12px; color: var(--text-muted); margin: 10px 0 4px; }
+  label.first { margin-top: 0; }
+  input[type="text"], input[type="number"], input[type="password"], select {
+    width: 100%; background: #101315; border: 1px solid var(--panel-border); color: var(--text);
+    border-radius: 6px; padding: 7px 9px; font-size: 13px; font-family: inherit;
+  }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  .checkbox-row { display: flex; align-items: center; gap: 7px; margin: 8px 0; }
+  .checkbox-row input { width: auto; accent-color: var(--accent); }
+  .checkbox-row label { margin: 0; color: var(--text); font-size: 12.5px; }
+
+  .mode-pills { display: flex; gap: 6px; margin-top: 4px; }
+  .mode-pills button {
+    flex: 1; padding: 6px 0; border-radius: 6px; border: 1px solid var(--panel-border);
+    background: #101315; color: var(--text-muted); font-size: 11.5px; cursor: pointer;
+  }
+  .mode-pills button.active { border-color: var(--accent); color: var(--accent); background: rgba(210,154,84,0.08); }
+
+  button.primary {
+    width: 100%; margin-top: 14px; padding: 9px; border-radius: 7px; border: none;
+    background: var(--accent); color: #14171a; font-weight: 700; font-size: 13px; cursor: pointer;
+  }
+  button.primary:hover { filter: brightness(1.08); }
+  button.secondary {
+    width: 100%; margin-top: 8px; padding: 8px; border-radius: 7px; border: 1px solid var(--panel-border);
+    background: transparent; color: var(--text-muted); font-size: 12.5px; cursor: pointer;
+  }
+  button.secondary:hover { color: var(--text); border-color: var(--text-faint); }
+  button.generate {
+    width: 100%; margin-top: 18px; padding: 11px; border-radius: 8px; border: none;
+    background: var(--ok); color: #10140f; font-weight: 700; font-size: 14px; cursor: pointer;
+  }
+  button.generate:disabled { opacity: 0.5; cursor: default; }
+
+  .feature-row {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 7px;
+    background: #101315; border: 1px solid var(--panel-border); margin-bottom: 6px; font-size: 12.5px;
+  }
+  .feature-row .idx { color: var(--text-faint); font-family: ui-monospace, monospace; width: 16px; }
+  .feature-row .desc { flex: 1; }
+  .feature-row .mode-badge { font-size: 10px; padding: 2px 6px; border-radius: 100px; text-transform: uppercase;
+    letter-spacing: 0.04em; }
+  .mode-badge.add { color: var(--ok); border: 1px solid var(--ok); }
+  .mode-badge.subtract { color: var(--err); border: 1px solid var(--err); }
+  .mode-badge.intersect { color: var(--sub); border: 1px solid var(--sub); }
+  .feature-row button { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 13px; padding: 2px 4px; }
+  .feature-row button:hover { color: var(--text); }
+  .empty-list { font-size: 12px; color: var(--text-faint); padding: 10px 0; }
+
+  .status { margin-top: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); font-family: ui-monospace, monospace; font-size: 11px; }
+  .downloads { display: flex; gap: 8px; margin-top: 10px; }
+  .downloads a { flex: 1; text-align: center; padding: 7px; border-radius: 6px; border: 1px solid var(--accent-dim);
+    color: var(--accent); text-decoration: none; font-size: 12px; font-weight: 600; }
+  .downloads a:hover { background: rgba(210,154,84,0.1); }
+
+  /* sketch canvas */
+  .sketch-wrap { border: 1px solid var(--panel-border); border-radius: 7px; overflow: hidden; margin-top: 6px; }
+  #sketchCanvas { display: block; background: #101315; cursor: crosshair; width: 100%; }
+  .sketch-toolbar { display: flex; gap: 6px; margin-top: 6px; }
+  .sketch-toolbar button { flex: 1; padding: 6px; font-size: 11.5px; border-radius: 6px;
+    border: 1px solid var(--panel-border); background: #101315; color: var(--text-muted); cursor: pointer; }
+  .sketch-toolbar button:hover { color: var(--text); }
+  .sketch-hint { font-size: 10.5px; color: var(--text-faint); margin-top: 4px; }
+  .points-readout { font: 11px/1.5 ui-monospace, monospace; color: var(--text-faint); margin-top: 6px;
+    max-height: 60px; overflow-y: auto; }
+
+  .auth-gate { position: fixed; inset: 0; background: rgba(10,12,14,0.92); display: flex; align-items: center;
+    justify-content: center; z-index: 10; backdrop-filter: blur(6px); }
+  .auth-box { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 24px; width: 320px; }
+  .auth-box h2 { margin: 0 0 4px; font-size: 15px; border: none; padding: 0; }
+  .auth-box p { margin: 0 0 14px; font-size: 12.5px; color: var(--text-muted); }
+  .auth-box button { width: 100%; margin-top: 10px; padding: 9px; border-radius: 6px; border: none;
+    background: var(--accent); color: #14171a; font-weight: 700; cursor: pointer; }
+
+  #gl { width: 100%; height: 100%; display: block; cursor: grab;
+    background: radial-gradient(ellipse at 50% 40%, var(--bg-2) 0%, var(--bg) 70%); }
+  #gl:active { cursor: grabbing; }
+  .viewer-hint { position: fixed; bottom: 16px; right: 22px; font: 500 11px/1 ui-monospace, monospace; color: var(--text-faint); }
+  .empty-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-faint); font-size: 13px; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div class="auth-gate" id="authGate">
+  <div class="auth-box">
+    <h2>cad-mcp feature-tree builder</h2>
+    <p>Enter the server's Bearer token (same one from <code>switchgear/.mcp.json</code>).</p>
+    <input type="password" id="tokenInput" placeholder="MCP_AUTH_TOKEN">
+    <button onclick="saveToken()">Continue</button>
+  </div>
+</div>
+
+<div class="panel">
+  <p class="eyebrow">cad-mcp-aidev-0721</p>
+  <h1>Feature-tree builder</h1>
+  <p class="sub">Add positioned primitives, combine with Add/Subtract/Intersect into one part. <a class="simple-link" href="/ui">&larr; single-shape tool</a></p>
+
+  <h2 class="first">New feature</h2>
+  <label class="first">Type</label>
+  <select id="typeSelect" onchange="renderParamForm()"></select>
+  <div id="paramFields"></div>
+
+  <div id="sketchTool" style="display:none">
+    <label class="first">Draw outline (click to add points, drag to move, dblclick to delete)</label>
+    <div class="sketch-wrap"><canvas id="sketchCanvas" width="336" height="336"></canvas></div>
+    <div class="sketch-toolbar">
+      <button onclick="undoPoint()">Undo last point</button>
+      <button onclick="clearPoints()">Clear</button>
+    </div>
+    <div class="sketch-hint">Grid is 10mm. Origin at center. Points connect in order, loop closes automatically.</div>
+    <div class="points-readout" id="pointsReadout"></div>
+  </div>
+
+  <h2>Position (mm)</h2>
+  <div class="row3">
+    <div><label class="first">X</label><input type="number" id="posX" value="0" step="0.5"></div>
+    <div><label class="first">Y</label><input type="number" id="posY" value="0" step="0.5"></div>
+    <div><label class="first">Z</label><input type="number" id="posZ" value="0" step="0.5"></div>
+  </div>
+  <h2>Rotation (deg)</h2>
+  <div class="row3">
+    <div><label class="first">RX</label><input type="number" id="rotX" value="0" step="5"></div>
+    <div><label class="first">RY</label><input type="number" id="rotY" value="0" step="5"></div>
+    <div><label class="first">RZ</label><input type="number" id="rotZ" value="0" step="5"></div>
+  </div>
+
+  <div id="modeSection">
+    <h2>Combine mode</h2>
+    <div class="mode-pills" id="modePills">
+      <button data-mode="add" class="active" onclick="setMode('add')">Add</button>
+      <button data-mode="subtract" onclick="setMode('subtract')">Subtract</button>
+      <button data-mode="intersect" onclick="setMode('intersect')">Intersect</button>
+    </div>
+  </div>
+
+  <button class="primary" id="addFeatureBtn" onclick="commitFeature()">Add feature to list</button>
+
+  <h2>Features (<span id="featureCount">0</span>)</h2>
+  <div id="featureList"><div class="empty-list">No features yet — add one above.</div></div>
+
+  <label class="first">Filename</label>
+  <input type="text" id="filenameInput" value="assembly">
+  <button class="generate" id="generateBtn" onclick="generateAssembly()" disabled>Generate assembly</button>
+  <div class="status" id="status"></div>
+  <div class="downloads" id="downloads" style="display:none">
+    <a id="dlStep" download>Download .step</a>
+    <a id="dlStl" download>Download .stl</a>
+  </div>
+</div>
+
+<div style="position:relative">
+  <canvas id="gl"></canvas>
+  <div class="empty-state" id="emptyState">Generate an assembly to preview it here</div>
+  <div class="viewer-hint">drag orbit · scroll zoom</div>
+</div>
+
+<script>
+"use strict";
+const FEATURE_SCHEMA = __FEATURE_SCHEMA_JSON__;
+const features = [];
+let editingIndex = null; // null = adding new, else index being edited
+let currentMode = "add";
+let sketchPoints = [];
+let draggingPointIdx = null;
+
+// ---- auth ----
+let authToken = sessionStorage.getItem("cadmcp_token") || "";
+function saveToken() {
+  authToken = document.getElementById("tokenInput").value.trim();
+  if (!authToken) return;
+  sessionStorage.setItem("cadmcp_token", authToken);
+  document.getElementById("authGate").style.display = "none";
+}
+if (authToken) document.getElementById("authGate").style.display = "none";
+
+// ---- type/param form ----
+const typeSelect = document.getElementById("typeSelect");
+for (const key of Object.keys(FEATURE_SCHEMA)) {
+  const opt = document.createElement("option");
+  opt.value = key; opt.textContent = FEATURE_SCHEMA[key].label;
+  typeSelect.appendChild(opt);
+}
+
+function renderParamForm() {
+  const type = typeSelect.value;
+  const container = document.getElementById("paramFields");
+  container.innerHTML = "";
+  const sketchTool = document.getElementById("sketchTool");
+  sketchTool.style.display = type === "sketch" ? "block" : "none";
+  if (type === "sketch") { sketchPoints = []; redrawSketch(); }
+
+  const params = FEATURE_SCHEMA[type].params;
+  for (const [name, [label, kind, def]] of Object.entries(params)) {
+    if (kind === "points") continue; // handled by the canvas tool instead
+    const wrap = document.createElement("div");
+    if (kind === "bool") {
+      wrap.className = "checkbox-row";
+      wrap.innerHTML = `<input type="checkbox" id="fp_${name}" ${def ? "checked" : ""}><label for="fp_${name}">${label}</label>`;
+    } else {
+      const [, , , lo, hi, step] = params[name];
+      wrap.innerHTML = `<label>${label}</label><input type="number" id="fp_${name}" value="${def}" min="${lo ?? ""}" max="${hi ?? ""}" step="${step ?? "any"}">`;
+    }
+    container.appendChild(wrap);
+  }
+}
+renderParamForm();
+
+function collectParams(type) {
+  const params = FEATURE_SCHEMA[type].params;
+  const out = {};
+  for (const [name, [, kind]] of Object.entries(params)) {
+    if (kind === "points") { out[name] = pointsToText(); continue; }
+    const el = document.getElementById(`fp_${name}`);
+    out[name] = kind === "bool" ? el.checked : parseFloat(el.value);
+  }
+  return out;
+}
+
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll("#modePills button").forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
+}
+
+// ---- sketch canvas ----
+const canvas = document.getElementById("sketchCanvas");
+const ctx = canvas.getContext("2d");
+const PX_PER_MM = 3.2, HALF_RANGE_MM = 336 / PX_PER_MM / 2;
+
+function mmToPx(x, y) { return [168 + x * PX_PER_MM, 168 - y * PX_PER_MM]; }
+function pxToMm(px, py) { return [(px - 168) / PX_PER_MM, (168 - py) / PX_PER_MM]; }
+
+function redrawSketch() {
+  ctx.clearRect(0, 0, 336, 336);
+  ctx.strokeStyle = "rgba(255,255,255,0.07)";
+  ctx.lineWidth = 1;
+  for (let g = -Math.floor(HALF_RANGE_MM/10)*10; g <= HALF_RANGE_MM; g += 10) {
+    const [gx] = mmToPx(g, 0); const [, gy] = mmToPx(0, g);
+    ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, 336); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(336, gy); ctx.stroke();
+  }
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.beginPath(); ctx.moveTo(168, 0); ctx.lineTo(168, 336); ctx.moveTo(0, 168); ctx.lineTo(336, 168); ctx.stroke();
+
+  if (sketchPoints.length) {
+    ctx.strokeStyle = "#d29a54"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    sketchPoints.forEach(([x, y], i) => {
+      const [px, py] = mmToPx(x, y);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    if (sketchPoints.length > 2) {
+      const [px0, py0] = mmToPx(sketchPoints[0][0], sketchPoints[0][1]);
+      ctx.setLineDash([4, 4]); ctx.lineTo(px0, py0); ctx.setLineDash([]);
+    }
+    ctx.stroke();
+    sketchPoints.forEach(([x, y], i) => {
+      const [px, py] = mmToPx(x, y);
+      ctx.fillStyle = i === 0 ? "#7fb37a" : "#d29a54";
+      ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+    });
+  }
+  document.getElementById("pointsReadout").textContent = sketchPoints.map(p => p.map(v=>v.toFixed(1)).join(",")).join(" | ") || "(no points yet)";
+}
+
+function findNearPoint(px, py) {
+  for (let i = 0; i < sketchPoints.length; i++) {
+    const [qx, qy] = mmToPx(sketchPoints[i][0], sketchPoints[i][1]);
+    if (Math.hypot(qx - px, qy - py) < 8) return i;
+  }
+  return -1;
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const px = (e.clientX - rect.left) * (336 / rect.width);
+  const py = (e.clientY - rect.top) * (336 / rect.height);
+  const near = findNearPoint(px, py);
+  if (near >= 0) { draggingPointIdx = near; return; }
+  const [mx, my] = pxToMm(px, py);
+  sketchPoints.push([Math.round(mx * 10) / 10, Math.round(my * 10) / 10]);
+  redrawSketch();
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (draggingPointIdx === null) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = (e.clientX - rect.left) * (336 / rect.width);
+  const py = (e.clientY - rect.top) * (336 / rect.height);
+  const [mx, my] = pxToMm(px, py);
+  sketchPoints[draggingPointIdx] = [Math.round(mx * 10) / 10, Math.round(my * 10) / 10];
+  redrawSketch();
+});
+window.addEventListener("pointerup", () => { draggingPointIdx = null; });
+canvas.addEventListener("dblclick", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const px = (e.clientX - rect.left) * (336 / rect.width);
+  const py = (e.clientY - rect.top) * (336 / rect.height);
+  const near = findNearPoint(px, py);
+  if (near >= 0) { sketchPoints.splice(near, 1); redrawSketch(); }
+});
+function undoPoint() { sketchPoints.pop(); redrawSketch(); }
+function clearPoints() { sketchPoints = []; redrawSketch(); }
+function pointsToText() { return sketchPoints.map(p => p.join(",")).join("\n"); }
+redrawSketch();
+
+// ---- feature list management ----
+function describeFeature(f, idx) {
+  const p = f.params;
+  const bits = Object.entries(p).slice(0, 2).map(([k, v]) => `${k}=${typeof v === "number" ? v : (typeof v === "string" ? "…" : v)}`);
+  return `${FEATURE_SCHEMA[f.type].label.split(" (")[0]} — ${bits.join(", ")}`;
+}
+
+function renderFeatureList() {
+  const list = document.getElementById("featureList");
+  document.getElementById("featureCount").textContent = features.length;
+  document.getElementById("generateBtn").disabled = features.length === 0;
+  if (!features.length) { list.innerHTML = '<div class="empty-list">No features yet — add one above.</div>'; return; }
+  list.innerHTML = "";
+  features.forEach((f, i) => {
+    const row = document.createElement("div");
+    row.className = "feature-row";
+    const mode = i === 0 ? "add" : f.mode;
+    row.innerHTML = `
+      <span class="idx">${i}</span>
+      <span class="desc">${describeFeature(f, i)}</span>
+      <span class="mode-badge ${mode}">${mode}</span>
+      <button title="Move up" onclick="moveFeature(${i},-1)">&uarr;</button>
+      <button title="Move down" onclick="moveFeature(${i},1)">&darr;</button>
+      <button title="Edit" onclick="editFeature(${i})">&#9998;</button>
+      <button title="Delete" onclick="deleteFeature(${i})">&times;</button>
+    `;
+    list.appendChild(row);
+  });
+}
+
+function moveFeature(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= features.length) return;
+  [features[i], features[j]] = [features[j], features[i]];
+  renderFeatureList();
+}
+function deleteFeature(i) { features.splice(i, 1); renderFeatureList(); }
+function editFeature(i) {
+  editingIndex = i;
+  const f = features[i];
+  typeSelect.value = f.type;
+  renderParamForm();
+  for (const [name, val] of Object.entries(f.params)) {
+    if (name === "points") { sketchPoints = _parseTextPoints(val); redrawSketch(); continue; }
+    const el = document.getElementById(`fp_${name}`);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = val; else el.value = val;
+  }
+  document.getElementById("posX").value = f.position.x; document.getElementById("posY").value = f.position.y; document.getElementById("posZ").value = f.position.z;
+  document.getElementById("rotX").value = f.rotation.rx; document.getElementById("rotY").value = f.rotation.ry; document.getElementById("rotZ").value = f.rotation.rz;
+  setMode(f.mode || "add");
+  document.getElementById("addFeatureBtn").textContent = "Save changes to feature " + i;
+}
+function _parseTextPoints(text) {
+  return String(text).split("\n").map(l => l.trim()).filter(Boolean).map(l => l.split(",").map(Number));
+}
+
+function commitFeature() {
+  const type = typeSelect.value;
+  const params = collectParams(type);
+  if (type === "sketch" && sketchPoints.length < 3) {
+    alert("Draw at least 3 points for the sketch outline.");
+    return;
+  }
+  const feature = {
+    type, params,
+    position: { x: parseFloat(document.getElementById("posX").value)||0, y: parseFloat(document.getElementById("posY").value)||0, z: parseFloat(document.getElementById("posZ").value)||0 },
+    rotation: { rx: parseFloat(document.getElementById("rotX").value)||0, ry: parseFloat(document.getElementById("rotY").value)||0, rz: parseFloat(document.getElementById("rotZ").value)||0 },
+    mode: currentMode,
+  };
+  if (editingIndex !== null) { features[editingIndex] = feature; editingIndex = null; }
+  else features.push(feature);
+  document.getElementById("addFeatureBtn").textContent = "Add feature to list";
+  renderFeatureList();
+}
+
+// ---- generate ----
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64); const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function base64ToBlob(b64, mime) { return new Blob([base64ToArrayBuffer(b64)], { type: mime }); }
+
+async function generateAssembly() {
+  if (!authToken) { document.getElementById("authGate").style.display = "flex"; return; }
+  const filename = document.getElementById("filenameInput").value.trim() || "assembly";
+  const statusEl = document.getElementById("status");
+  const btn = document.getElementById("generateBtn");
+  const downloads = document.getElementById("downloads");
+  downloads.style.display = "none";
+  statusEl.className = "status"; statusEl.textContent = "Generating…";
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/generate-assembly", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + authToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ features, filename, stl: true }),
+    });
+    if (resp.status === 401) {
+      sessionStorage.removeItem("cadmcp_token"); authToken = "";
+      document.getElementById("authGate").style.display = "flex"; statusEl.textContent = ""; return;
+    }
+    const data = await resp.json();
+    if (!data.ok) {
+      statusEl.className = "status err";
+      statusEl.textContent = (data.error || "Generation failed") + "\n\n" + (data.stderr || "").slice(-1500);
+      return;
+    }
+    statusEl.className = "status ok";
+    statusEl.textContent = "Generated " + filename + ".step + .stl";
+    const stepBlob = base64ToBlob(data.step_base64, "application/step");
+    const dlStep = document.getElementById("dlStep");
+    dlStep.href = URL.createObjectURL(stepBlob); dlStep.download = filename + ".step";
+    if (data.stl_base64) {
+      const stlBlob = base64ToBlob(data.stl_base64, "model/stl");
+      const dlStl = document.getElementById("dlStl");
+      dlStl.href = URL.createObjectURL(stlBlob); dlStl.download = filename + ".stl";
+      loadPreview(base64ToArrayBuffer(data.stl_base64));
+    }
+    downloads.style.display = "flex";
+  } catch (err) {
+    statusEl.className = "status err"; statusEl.textContent = String(err);
+  } finally {
+    btn.disabled = features.length === 0;
+  }
+}
+
+// ---- minimal WebGL STL preview ----
+const glCanvas = document.getElementById("gl");
+const gl = glCanvas.getContext("webgl", { antialias: true, alpha: false });
+const emptyState = document.getElementById("emptyState");
+
+function parseBinarySTL(buf) {
+  const dv = new DataView(buf);
+  const triCount = dv.getUint32(80, true);
+  const positions = new Float32Array(triCount * 9);
+  const normals = new Float32Array(triCount * 9);
+  let offset = 84;
+  for (let i = 0; i < triCount; i++) {
+    const nx = dv.getFloat32(offset, true), ny = dv.getFloat32(offset + 4, true), nz = dv.getFloat32(offset + 8, true);
+    for (let v = 0; v < 3; v++) {
+      const vOff = offset + 12 + v * 12;
+      const base = (i * 3 + v) * 3;
+      positions[base] = dv.getFloat32(vOff, true);
+      positions[base + 1] = dv.getFloat32(vOff + 4, true);
+      positions[base + 2] = dv.getFloat32(vOff + 8, true);
+      normals[base] = nx; normals[base + 1] = ny; normals[base + 2] = nz;
+    }
+    offset += 50;
+  }
+  return { positions, normals, triCount };
+}
+const mat4 = {
+  create() { return new Float32Array(16); },
+  identity(o) { o.fill(0); o[0]=o[5]=o[10]=o[15]=1; return o; },
+  perspective(o, fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2);
+    o.fill(0); o[0] = f / aspect; o[5] = f;
+    o[10] = (far + near) / (near - far); o[11] = -1;
+    o[14] = (2 * far * near) / (near - far);
+    return o;
+  },
+  lookAt(o, eye, center, up) {
+    const z = normalize(sub(eye, center));
+    const x = normalize(cross(up, z));
+    const y = cross(z, x);
+    o[0]=x[0]; o[4]=x[1]; o[8]=x[2]; o[12]=-dot(x,eye);
+    o[1]=y[0]; o[5]=y[1]; o[9]=y[2]; o[13]=-dot(y,eye);
+    o[2]=z[0]; o[6]=z[1]; o[10]=z[2]; o[14]=-dot(z,eye);
+    o[3]=0; o[7]=0; o[11]=0; o[15]=1;
+    return o;
+  },
+  normalFromMat4(o3, m) {
+    o3[0]=m[0]; o3[1]=m[1]; o3[2]=m[2]; o3[3]=m[4]; o3[4]=m[5]; o3[5]=m[6]; o3[6]=m[8]; o3[7]=m[9]; o3[8]=m[10];
+    return o3;
+  }
+};
+function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function length(a){return Math.sqrt(dot(a,a));}
+function normalize(a){const l=length(a)||1;return [a[0]/l,a[1]/l,a[2]/l];}
+
+const vsSource = `
+  attribute vec3 aPosition; attribute vec3 aNormal;
+  uniform mat4 uView; uniform mat4 uProj; uniform mat3 uNormalMatrix;
+  varying vec3 vNormal; varying vec3 vViewPos;
+  void main() {
+    vec4 viewPos = uView * vec4(aPosition, 1.0);
+    vViewPos = viewPos.xyz;
+    vNormal = normalize(uNormalMatrix * aNormal);
+    gl_Position = uProj * viewPos;
+  }`;
+const fsSource = `
+  precision mediump float;
+  varying vec3 vNormal; varying vec3 vViewPos;
+  void main() {
+    vec3 N = normalize(vNormal);
+    if (!gl_FrontFacing) N = -N;
+    vec3 V = normalize(-vViewPos);
+    vec3 L1 = normalize(vec3(0.5, 0.8, 1.0));
+    vec3 L2 = normalize(vec3(-0.6, -0.3, 0.5));
+    float diff1 = max(dot(N, L1), 0.0);
+    float diff2 = max(dot(N, L2), 0.0) * 0.35;
+    vec3 H = normalize(L1 + V);
+    float spec = pow(max(dot(N, H), 0.0), 28.0) * 0.5;
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 2.2) * 0.22;
+    vec3 base = vec3(0.55, 0.72, 0.62);
+    vec3 color = base * (0.3 + diff1 * 0.72 + diff2) + vec3(spec) + vec3(0.7,0.8,0.75) * rim;
+    gl_FragColor = vec4(color, 1.0);
+  }`;
+function compile(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const program = gl.createProgram();
+gl.attachShader(program, compile(gl.VERTEX_SHADER, vsSource));
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(program);
+gl.useProgram(program);
+const aPosition = gl.getAttribLocation(program, "aPosition");
+const aNormal = gl.getAttribLocation(program, "aNormal");
+const uView = gl.getUniformLocation(program, "uView");
+const uProj = gl.getUniformLocation(program, "uProj");
+const uNormalMatrix = gl.getUniformLocation(program, "uNormalMatrix");
+gl.enable(gl.DEPTH_TEST);
+gl.clearColor(0.078, 0.09, 0.102, 1.0);
+
+let mesh = null;
+let azimuth = 0.7, elevation = 0.35, distance = 3.2, autoSpin = true;
+let dragging = false, lastX = 0, lastY = 0;
+
+function loadPreview(arrayBuffer) {
+  emptyState.style.display = "none";
+  const { positions, normals, triCount } = parseBinarySTL(arrayBuffer);
+  let minX=Infinity,minY=Infinity,minZ=Infinity,maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    minX=Math.min(minX,positions[i]); maxX=Math.max(maxX,positions[i]);
+    minY=Math.min(minY,positions[i+1]); maxY=Math.max(maxY,positions[i+1]);
+    minZ=Math.min(minZ,positions[i+2]); maxZ=Math.max(maxZ,positions[i+2]);
+  }
+  const cx=(minX+maxX)/2, cy=(minY+maxY)/2, cz=(minZ+maxZ)/2;
+  const extent = Math.max(maxX-minX, maxY-minY, maxZ-minZ) || 1;
+  const scale = 1.6 / extent;
+  for (let i = 0; i < positions.length; i += 3) {
+    positions[i] = (positions[i]-cx)*scale;
+    positions[i+1] = (positions[i+1]-cy)*scale;
+    positions[i+2] = (positions[i+2]-cz)*scale;
+  }
+  const posBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+  const normBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+  mesh = { posBuffer, normBuffer, triCount };
+  autoSpin = true;
+}
+
+glCanvas.addEventListener("pointerdown", (e) => {
+  dragging = true; autoSpin = false; lastX = e.clientX; lastY = e.clientY;
+  glCanvas.setPointerCapture(e.pointerId);
+});
+glCanvas.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  azimuth += (e.clientX - lastX) * 0.008;
+  elevation += (e.clientY - lastY) * 0.008;
+  elevation = Math.max(-1.4, Math.min(1.4, elevation));
+  lastX = e.clientX; lastY = e.clientY;
+});
+glCanvas.addEventListener("pointerup", () => { dragging = false; });
+glCanvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  distance = Math.max(0.8, Math.min(12, distance + e.deltaY * 0.003));
+}, { passive: false });
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const rect = glCanvas.parentElement.getBoundingClientRect();
+  glCanvas.width = rect.width * dpr; glCanvas.height = rect.height * dpr;
+  glCanvas.style.width = rect.width + "px"; glCanvas.style.height = rect.height + "px";
+  gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const view = mat4.create(), proj = mat4.create(), normalMatrix = new Float32Array(9);
+function render() {
+  if (autoSpin) azimuth += 0.0015;
+  if (mesh) {
+    const eye = [Math.sin(azimuth)*Math.cos(elevation)*distance, Math.sin(elevation)*distance, Math.cos(azimuth)*Math.cos(elevation)*distance];
+    mat4.lookAt(view, eye, [0,0,0], [0,1,0]);
+    mat4.perspective(proj, Math.PI/5, glCanvas.width/glCanvas.height, 0.05, 100);
+    mat4.normalFromMat4(normalMatrix, view);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.uniformMatrix4fv(uView, false, view);
+    gl.uniformMatrix4fv(uProj, false, proj);
+    gl.uniformMatrix3fv(uNormalMatrix, false, normalMatrix);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.posBuffer);
+    gl.enableVertexAttribArray(aPosition);
+    gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.normBuffer);
+    gl.enableVertexAttribArray(aNormal);
+    gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, mesh.triCount * 3);
+  }
+  requestAnimationFrame(render);
+}
+render();
+</script>
+</body>
+</html>

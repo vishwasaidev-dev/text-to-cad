@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
+import features
 import shapes
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +32,12 @@ _UI_HTML = (
     (Path(__file__).resolve().parent / "ui.html")
     .read_text(encoding="utf-8")
     .replace("__SCHEMA_JSON__", json.dumps(shapes.SCHEMA))
+)
+
+_BUILDER_HTML = (
+    (Path(__file__).resolve().parent / "builder.html")
+    .read_text(encoding="utf-8")
+    .replace("__FEATURE_SCHEMA_JSON__", json.dumps(features.FEATURE_SCHEMA))
 )
 
 # FastMCP defaults to DNS-rebinding Host-header checks scoped to localhost, which
@@ -205,7 +212,7 @@ def _is_authorized(request: Request) -> bool:
 # custom Authorization header -- the page itself prompts for the token and
 # sends it on subsequent fetch() calls to /api/generate-shape, which DOES
 # stay behind the auth check like every other route.
-PUBLIC_PATHS = {"/", "/ui"}
+PUBLIC_PATHS = {"/", "/ui", "/ui/builder"}
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
@@ -223,6 +230,31 @@ async def health(request: Request) -> JSONResponse:
 
 async def ui_page(request: Request) -> HTMLResponse:
     return HTMLResponse(_UI_HTML)
+
+
+async def builder_page(request: Request) -> HTMLResponse:
+    return HTMLResponse(_BUILDER_HTML)
+
+
+async def generate_assembly_endpoint(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+
+    raw_features = body.get("features") or []
+    filename = body.get("filename") or "assembly"
+    want_stl = bool(body.get("stl", True))
+
+    try:
+        source = features.compose_source(raw_features)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001 - report to the UI rather than 500
+        return JSONResponse({"ok": False, "error": f"unexpected error building source: {exc}"}, status_code=400)
+
+    result = _generate_step_impl(source, filename=filename, stl=want_stl)
+    return JSONResponse(result)
 
 
 async def generate_shape_endpoint(request: Request) -> JSONResponse:
@@ -253,7 +285,9 @@ def build_app() -> Starlette:
         routes=[
             Route("/", health),
             Route("/ui", ui_page),
+            Route("/ui/builder", builder_page),
             Route("/api/generate-shape", generate_shape_endpoint, methods=["POST"]),
+            Route("/api/generate-assembly", generate_assembly_endpoint, methods=["POST"]),
         ],
         middleware=[Middleware(BearerAuthMiddleware)],
         # FastMCP's streamable_http_app() carries its own lifespan (starts the
