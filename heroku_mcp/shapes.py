@@ -89,6 +89,10 @@ SCHEMA: dict[str, dict] = {
             ),
             "thickness": ("Extrude thickness (mm)", "float", 4.0, 0.25, 40.0, 0.25),
             "round_edges": ("Round the top/bottom perimeter edge", "bool", True, None, None, None),
+            "smooth": (
+                "Smooth free-form curve through the points instead of straight edges",
+                "bool", False, None, None, None,
+            ),
         },
     },
 }
@@ -264,8 +268,24 @@ def gen_step():
 
 def polygon_source(p: dict) -> str:
     points_literal = ", ".join(f"({x}, {y})" for x, y in p["points"])
+    # Smooth mode swaps the straight-edge Polygon for a Spline run through the
+    # same points, closed back to the start with one straight Line -- same
+    # closure convention Polygon uses (implicit last->first edge), so switching
+    # `smooth` on/off doesn't change how the outline is meant to be closed,
+    # only whether the edges between points are curved or straight. A fully
+    # periodic (self-closing) spline was considered instead, but a spline can
+    # overshoot its control points between segments, and letting that overshoot
+    # happen right at the closing edge too (rather than confining it to one
+    # known straight segment) makes self-intersecting outlines more likely.
+    if p["smooth"]:
+        profile = f'''            with BuildLine() as ln:
+                Spline(*outline)
+                Line(outline[-1], outline[0])
+            make_face()'''
+    else:
+        profile = "            Polygon(*outline)"
     return f'''
-from build123d import BuildPart, BuildSketch, Polygon, extrude
+from build123d import BuildPart, BuildSketch, BuildLine, Polygon, Spline, Line, make_face, extrude
 {_soften_helper_source()}
 
 def gen_step():
@@ -273,7 +293,7 @@ def gen_step():
     outline = [{points_literal}]
     with BuildPart() as part:
         with BuildSketch() as sk:
-            Polygon(*outline)
+{profile}
         extrude(sk.sketch, amount=thickness)
     body = part.part
     if {p["round_edges"]}:

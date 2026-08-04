@@ -112,6 +112,10 @@ FEATURE_SCHEMA: dict[str, dict] = {
             ),
             "thickness": ("Extrude thickness (mm)", "float", 4.0, 0.25, 40.0, 0.25),
             "midplane": ("Extrude both ways from the plane", "bool", False, None, None, None),
+            "smooth": (
+                "Smooth free-form curve through the points instead of straight edges",
+                "bool", False, None, None, None,
+            ),
         },
     },
     "revolve": {
@@ -126,6 +130,10 @@ FEATURE_SCHEMA: dict[str, dict] = {
                 None,
             ),
             "angle": ("Revolve angle (deg)", "float", 360.0, 5.0, 360.0, 5.0),
+            "smooth": (
+                "Smooth free-form curve through the points instead of straight edges",
+                "bool", False, None, None, None,
+            ),
         },
     },
 }
@@ -247,11 +255,23 @@ def _plate_snippet(var: str, p: dict) -> str:
 
 def _sketch_snippet(var: str, p: dict) -> str:
     points_literal = ", ".join(f"({x}, {y})" for x, y in p["points"])
+    # See shapes.polygon_source for why smooth mode is an open Spline plus one
+    # straight closing Line (matching Polygon's implicit last->first edge)
+    # rather than a periodic self-closing spline.
+    if p["smooth"]:
+        profile = (
+            f"            with BuildLine() as {var}_ln:\n"
+            f"                Spline(*{var}_outline)\n"
+            f"                Line({var}_outline[-1], {var}_outline[0])\n"
+            f"            make_face()"
+        )
+    else:
+        profile = f"            Polygon(*{var}_outline)"
     return f'''
     {var}_outline = [{points_literal}]
     with BuildPart() as {var}_b:
         with BuildSketch() as {var}_sk:
-            Polygon(*{var}_outline)
+{profile}
         extrude({var}_sk.sketch, amount={p["thickness"]}, both={p["midplane"]})
     {var}_base = {var}_b.part
 '''
@@ -260,13 +280,26 @@ def _sketch_snippet(var: str, p: dict) -> str:
 def _revolve_snippet(var: str, p: dict) -> str:
     # Profile lives on the XZ plane with x = radius from the Z axis; every x is
     # clamped >= 0 in validation, because a profile that crosses its own axis
-    # of revolution makes a self-intersecting solid that OCC rejects.
+    # of revolution makes a self-intersecting solid that OCC rejects. Smooth
+    # mode (see shapes.polygon_source) only curves the edges BETWEEN the given
+    # points -- a spline can still overshoot its control points mid-segment,
+    # so a profile with points close to radius=0 can still bulge past the
+    # axis even though every literal point stays clamped >= 0.
     points_literal = ", ".join(f"({x}, {y})" for x, y in p["points"])
+    if p["smooth"]:
+        profile = (
+            f"            with BuildLine() as {var}_ln:\n"
+            f"                Spline(*{var}_profile)\n"
+            f"                Line({var}_profile[-1], {var}_profile[0])\n"
+            f"            make_face()"
+        )
+    else:
+        profile = f"            Polygon(*{var}_profile)"
     return f'''
     {var}_profile = [{points_literal}]
     with BuildPart() as {var}_b:
         with BuildSketch(Plane.XZ) as {var}_sk:
-            Polygon(*{var}_profile)
+{profile}
         revolve(axis=Axis.Z, revolution_arc={p["angle"]})
     {var}_base = {var}_b.part
 '''
@@ -490,9 +523,9 @@ def _flat(x):
 
 _PREAMBLE = '''
 from build123d import (
-    BuildPart, BuildSketch, Box, Cylinder, Polygon, Circle, RectangleRounded,
-    Locations, Location, Plane, extrude, revolve, Mode, Helix, sweep, Axis,
-    fillet, Compound,
+    BuildPart, BuildSketch, BuildLine, Box, Cylinder, Polygon, Spline, Line,
+    make_face, Circle, RectangleRounded, Locations, Location, Plane, extrude,
+    revolve, Mode, Helix, sweep, Axis, fillet, Compound,
 )
 '''
 
