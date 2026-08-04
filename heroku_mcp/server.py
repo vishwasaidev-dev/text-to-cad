@@ -390,6 +390,94 @@ async def generate_shape_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+# Generous enough for a real part, well under Heroku's request-body ceiling --
+# the import+tessellate work below still has to land inside the router's 30s
+# window regardless of this cap, same tradeoff already accepted by every
+# other subprocess-backed route in this file.
+MAX_PREVIEW_STEP_BYTES = 20 * 1024 * 1024
+
+_PREVIEW_CONVERT_SCRIPT = '''
+import sys
+from build123d import import_step, export_stl
+
+step_path, stl_path = sys.argv[1], sys.argv[2]
+part = import_step(step_path)
+export_stl(part, stl_path, tolerance=0.02, angular_tolerance=0.25)
+'''
+
+
+async def preview_step_endpoint(request: Request) -> JSONResponse:
+    """Import an arbitrary uploaded STEP file and tessellate it to STL so the
+    /ui and /ui/builder pages' existing WebGL viewer can preview it.
+
+    Every other route here only runs forward (build123d source -> STEP/STL).
+    This is the one reverse path -- for viewing a STEP file the user already
+    has (e.g. one this service generated earlier and downloaded, or an
+    external file), not one being generated fresh.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+
+    step_b64 = body.get("step_base64")
+    if not step_b64:
+        return JSONResponse({"ok": False, "error": "step_base64 is required"}, status_code=400)
+    try:
+        step_bytes = base64.b64decode(step_b64)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"invalid base64: {exc}"}, status_code=400)
+    if len(step_bytes) > MAX_PREVIEW_STEP_BYTES:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"STEP file too large ({len(step_bytes)} bytes, max {MAX_PREVIEW_STEP_BYTES})",
+            },
+            status_code=400,
+        )
+
+    with tempfile.TemporaryDirectory(prefix="cadmcp-preview-") as tmp:
+        work_dir = Path(tmp)
+        step_path = work_dir / "upload.step"
+        step_path.write_bytes(step_bytes)
+        stl_path = work_dir / "upload.stl"
+        script_path = work_dir / "convert.py"
+        script_path.write_text(_PREVIEW_CONVERT_SCRIPT, encoding="utf-8")
+
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script_path), step_path.as_posix(), stl_path.as_posix()],
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"preview conversion timed out after {SUBPROCESS_TIMEOUT_SECONDS}s",
+                    "stderr": _tail(exc.stderr or ""),
+                },
+                status_code=504,
+            )
+
+        if result.returncode != 0 or not stl_path.exists():
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "STEP import/tessellation failed",
+                    "stdout": _tail(result.stdout),
+                    "stderr": _tail(result.stderr),
+                },
+                status_code=422,
+            )
+
+        return JSONResponse(
+            {"ok": True, "stl_base64": base64.b64encode(stl_path.read_bytes()).decode("ascii")}
+        )
+
+
 def build_app() -> Starlette:
     mcp_app = mcp.streamable_http_app()
     app = Starlette(
@@ -399,6 +487,7 @@ def build_app() -> Starlette:
             Route("/ui/builder", builder_page),
             Route("/api/generate-shape", generate_shape_endpoint, methods=["POST"]),
             Route("/api/generate-assembly", generate_assembly_endpoint, methods=["POST"]),
+            Route("/api/preview-step", preview_step_endpoint, methods=["POST"]),
         ],
         middleware=[Middleware(BearerAuthMiddleware)],
         # FastMCP's streamable_http_app() carries its own lifespan (starts the

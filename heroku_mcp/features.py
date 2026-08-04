@@ -5,7 +5,8 @@ shapes.py's single-shape templates.
 A *body* is one solid part: an ordered list of features folded together with
 boolean ops. A *model* is one or more bodies (an assembly). Each feature is:
 
-    {"type": "box"|"rod"|"tube"|"link"|"coil"|"plate"|"sketch"|"revolve",
+    {"type": "box"|"rod"|"tube"|"link"|"coil"|"plate"|"sketch"|"revolve"
+             |"fillet"|"chamfer",
      "params": {...type-specific, see FEATURE_SCHEMA...},
      "position": {"x":.., "y":.., "z":..},
      "rotation": {"rx":.., "ry":.., "rz":..},   # degrees, build123d's
@@ -25,6 +26,11 @@ is the natural convention for that shape), then placed by one or more
 Location transforms (more than one when the feature is patterned), then folded
 into the running result with the requested boolean op.
 
+fillet/chamfer are the one exception to all of the above: they aren't placed
+primitives, they modify the running body's own edges in place, so position/
+rotation/mode/pattern are meaningless for them and ignored. They can't be a
+body's first feature (nothing to modify yet).
+
 As with shapes.py, every value here is validated to a plain float/bool/
 point-list before it is ever formatted into source -- no request text is
 interpolated as code.
@@ -40,6 +46,10 @@ MAX_PATTERN_COUNT = 60
 
 # Per-type param schema: (label, kind, default, min, max, step). Position,
 # rotation, mode, and pattern are handled generically for every type.
+# kind "choice" repurposes the min slot to hold the list of valid string
+# values instead of a number (same trick "points" already plays on the
+# default slot) -- keeps every param a uniform 6-tuple rather than growing
+# a second per-kind shape.
 FEATURE_SCHEMA: dict[str, dict] = {
     "box": {
         "label": "Box",
@@ -133,6 +143,28 @@ FEATURE_SCHEMA: dict[str, dict] = {
             "smooth": (
                 "Smooth free-form curve through the points instead of straight edges",
                 "bool", False, None, None, None,
+            ),
+        },
+    },
+    "fillet": {
+        "label": "Fillet (round edges of the body so far)",
+        "params": {
+            "radius": ("Fillet radius (mm)", "float", 1.0, 0.05, 30.0, 0.05),
+            "edge_filter": (
+                "Which edges", "choice", "non_vertical",
+                ["non_vertical", "vertical", "all"],
+                None, None,
+            ),
+        },
+    },
+    "chamfer": {
+        "label": "Chamfer (bevel edges of the body so far)",
+        "params": {
+            "distance": ("Chamfer distance (mm)", "float", 1.0, 0.05, 30.0, 0.05),
+            "edge_filter": (
+                "Which edges", "choice", "non_vertical",
+                ["non_vertical", "vertical", "all"],
+                None, None,
             ),
         },
     },
@@ -305,6 +337,52 @@ def _revolve_snippet(var: str, p: dict) -> str:
 '''
 
 
+def _edge_op_helper_source() -> str:
+    # Shared runtime for the fillet/chamfer feature types. Tries the
+    # requested amount, then a shrinking ladder -- same defensive pattern as
+    # _soften, since one tight corner failing shouldn't blow up the whole
+    # build when everywhere else would have filleted/chamfered fine.
+    return '''
+def _apply_edge_op(part, op, amount, edge_filter):
+    from build123d import Axis, fillet, chamfer
+    try:
+        edges = part.edges()
+    except Exception:
+        return part
+    if edge_filter == "vertical":
+        candidates = list(edges.filter_by(Axis.Z))
+    elif edge_filter == "non_vertical":
+        candidates = list(edges - edges.filter_by(Axis.Z))
+    else:
+        candidates = list(edges)
+    if not candidates:
+        return part
+    fn = fillet if op == "fillet" else chamfer
+    for scale in (1.0, 0.75, 0.5, 0.25):
+        try:
+            return fn(candidates, amount * scale)
+        except Exception:
+            continue
+    return part
+'''
+
+
+def _fillet_chamfer_lines(body_var: str, ftype: str, params: dict, label: str) -> list[str]:
+    """fillet/chamfer aren't placed primitives like everything in
+    SNIPPET_BUILDERS -- they modify body_var's own edges in place, so they
+    skip _feature_lines' placement/pattern/mode machinery entirely and just
+    call the shared _apply_edge_op runtime helper directly on the running
+    body. Handled as a special case in _body_lines rather than living in
+    SNIPPET_BUILDERS, since every one of those returns a fresh `{var}_base`
+    solid to be added/subtracted/intersected -- these two don't."""
+    amount = params["radius"] if ftype == "fillet" else params["distance"]
+    edge_filter = params["edge_filter"]
+    return [
+        f"    # feature {label}: {ftype}",
+        f"    {body_var} = _apply_edge_op({body_var}, {ftype!r}, {amount}, {edge_filter!r})",
+    ]
+
+
 SNIPPET_BUILDERS = {
     "box": _box_snippet,
     "rod": _rod_snippet,
@@ -329,6 +407,8 @@ def _validate_feature_params(ftype: str, raw_params: dict) -> dict:
             out[name] = bool(raw)
         elif kind == "points":
             out[name] = _parse_points(raw)
+        elif kind == "choice":
+            out[name] = raw if raw in lo else default  # lo holds the options list here
         else:
             value = float(raw)
             if lo is not None:
@@ -469,6 +549,25 @@ def _body_lines(body_var: str, features: list[dict], body_label: str) -> list[st
     add_group: list[str] = []          # vars pending Compound-merge into body_var
     started = False
     for i, raw in enumerate(live):
+        ftype = raw.get("type")
+        if ftype in ("fillet", "chamfer"):
+            # Not a placed primitive -- modifies body_var's own edges in
+            # place, so it needs a real solid already sitting in body_var
+            # (never the body's first feature) and skips _feature_lines'
+            # placement/pattern/mode machinery entirely.
+            if not started and not add_group:
+                raise ValueError(
+                    f"Feature {body_label}.{i}: {ftype} needs a preceding solid feature, "
+                    "it can't be the first feature in a body"
+                )
+            if add_group:
+                lines.append(_flush_add_group(body_var, add_group, started))
+                add_group = []
+                started = True
+            params = _validate_feature_params(ftype, raw.get("params") or {})
+            lines += _fillet_chamfer_lines(body_var, ftype, params, f"{body_label}.{i}")
+            continue
+
         var = f"{body_var}_f{i}"
         lines += _feature_lines(var, raw, f"{body_label}.{i}")
         mode = raw.get("mode", "add") if i > 0 else "add"
@@ -525,13 +624,16 @@ _PREAMBLE = '''
 from build123d import (
     BuildPart, BuildSketch, BuildLine, Box, Cylinder, Polygon, Spline, Line,
     make_face, Circle, RectangleRounded, Locations, Location, Plane, extrude,
-    revolve, Mode, Helix, sweep, Axis, fillet, Compound,
+    revolve, Mode, Helix, sweep, Axis, fillet, chamfer, Compound,
 )
 '''
 
 
 def _module(body: str) -> str:
-    return f"{_PREAMBLE}{_soften_helper_source()}{_flat_helper_source()}\n\ndef gen_step():\n{body}\n"
+    return (
+        f"{_PREAMBLE}{_soften_helper_source()}{_flat_helper_source()}"
+        f"{_edge_op_helper_source()}\n\ndef gen_step():\n{body}\n"
+    )
 
 
 def compose_source(raw_features: list[dict]) -> str:
@@ -609,7 +711,7 @@ def compose_multibody_runner(bodies: list[dict], assembly_name: str) -> tuple[st
     source = f'''{_PREAMBLE}
 import json, traceback
 from build123d import export_step, export_stl
-{_soften_helper_source()}{_flat_helper_source()}
+{_soften_helper_source()}{_flat_helper_source()}{_edge_op_helper_source()}
 
 _manifest = {{"bodies": [], "assembly": None}}
 

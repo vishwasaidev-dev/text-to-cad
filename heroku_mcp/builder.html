@@ -188,6 +188,8 @@
     <button class="tb" onclick="exportDesign()">Export</button>
     <button class="tb" onclick="document.getElementById('importFile').click()">Import</button>
     <input type="file" id="importFile" accept=".json" style="display:none" onchange="importDesign(event)">
+    <button class="tb" onclick="document.getElementById('stepFile').click()" title="Preview an existing .step file (read-only, not editable here)">View STEP</button>
+    <input type="file" id="stepFile" accept=".step,.stp" style="display:none" onchange="previewStepFile(event)">
   </div>
   <div class="tb-sep"></div>
   <div class="tb-group">
@@ -296,7 +298,8 @@
 const SCHEMA = __FEATURE_SCHEMA_JSON__;
 
 const TYPE_ICON = {box:"▢", rod:"▬", tube:"◎", link:"⑃", coil:"◍",
-                   plate:"▤", sketch:"✎", revolve:"⟳"};
+                   plate:"▤", sketch:"✎", revolve:"⟳", fillet:"◟", chamfer:"◺"};
+const MODIFIER_TYPES = new Set(["fillet", "chamfer"]);
 const BODY_COLORS = ["#8fbf9f","#d9a05b","#7fa8d0","#c98fa8","#a99ad6","#9fc07a","#d0925f","#7ec6c0"];
 const DENSITIES = {Steel:7.85, Aluminium:2.70, Brass:8.50, Copper:8.96, "ABS plastic":1.04, Nylon:1.15};
 const STORE_KEY = "cadmcp_design_v2";
@@ -505,8 +508,12 @@ function renameBody(id, span) {
   inp.onkeydown = (e) => { if (e.key === "Enter") inp.blur(); if (e.key === "Escape") { done = true; renderAll(); } };
 }
 function addFeature(type) {
-  pushUndo();
   const b = curBody();
+  if (MODIFIER_TYPES.has(type) && !b.features.length) {
+    status(SCHEMA[type].label + " needs a feature to modify — add a solid first.", "err");
+    return;
+  }
+  pushUndo();
   const f = defaultFeature(type);
   b.features.push(f);
   state.selFeature = f.id;
@@ -546,6 +553,7 @@ function renderProps() {
   if (f) {
     document.getElementById("propTitle").textContent = SCHEMA[f.type].label;
     const idx = body.features.indexOf(f);
+    const isMod = MODIFIER_TYPES.has(f.type);
 
     h += `<div class="grp"><div class="grp-t">Parameters</div>`;
     for (const [name, spec] of Object.entries(SCHEMA[f.type].params)) {
@@ -555,6 +563,10 @@ function renderProps() {
       } else if (kind === "bool") {
         h += `<div class="cbrow"><input type="checkbox" id="p_${name}" ${f.params[name] ? "checked" : ""}
                 onchange="setParam('${name}',this.checked)"><label for="p_${name}">${esc(label)}</label></div>`;
+      } else if (kind === "choice") {
+        h += `<label>${esc(label)}</label><select onchange="setParam('${name}',this.value)">
+              ${lo.map(opt => `<option value="${esc(opt)}" ${f.params[name]===opt?"selected":""}>${esc(opt)}</option>`).join("")}
+              </select>`;
       } else {
         h += `<label>${esc(label)}</label>
               <input type="number" value="${f.params[name]}" min="${lo}" max="${hi}" step="${step}"
@@ -563,21 +575,27 @@ function renderProps() {
     }
     h += `</div>`;
 
-    h += `<div class="grp"><div class="grp-t">Position (mm)</div><div class="r3">
-      ${vecInput("position","x","X",f)}${vecInput("position","y","Y",f)}${vecInput("position","z","Z",f)}</div>
-      <div class="grp-t" style="margin:12px 0 8px">Rotation (deg)</div><div class="r3">
-      ${vecInput("rotation","rx","RX",f)}${vecInput("rotation","ry","RY",f)}${vecInput("rotation","rz","RZ",f)}</div></div>`;
-
-    if (idx > 0) {
-      h += `<div class="grp"><div class="grp-t">Combine with result</div><div class="pills">
-        ${["add","subtract","intersect"].map(m =>
-          `<button class="${f.mode===m?"on":""}" onclick="setMode('${m}')">${m[0].toUpperCase()+m.slice(1)}</button>`).join("")}
-      </div></div>`;
+    if (isMod) {
+      h += `<div class="grp"><div class="hint" style="padding:0">Modifies the body's edges in place — no
+        position, mode, or pattern of its own; it applies wherever it sits in the feature list.</div></div>`;
     } else {
-      h += `<div class="grp"><div class="hint" style="padding:0">First feature in the body — always the base solid.</div></div>`;
+      h += `<div class="grp"><div class="grp-t">Position (mm)</div><div class="r3">
+        ${vecInput("position","x","X",f)}${vecInput("position","y","Y",f)}${vecInput("position","z","Z",f)}</div>
+        <div class="grp-t" style="margin:12px 0 8px">Rotation (deg)</div><div class="r3">
+        ${vecInput("rotation","rx","RX",f)}${vecInput("rotation","ry","RY",f)}${vecInput("rotation","rz","RZ",f)}</div></div>`;
+
+      if (idx > 0) {
+        h += `<div class="grp"><div class="grp-t">Combine with result</div><div class="pills">
+          ${["add","subtract","intersect"].map(m =>
+            `<button class="${f.mode===m?"on":""}" onclick="setMode('${m}')">${m[0].toUpperCase()+m.slice(1)}</button>`).join("")}
+        </div></div>`;
+      } else {
+        h += `<div class="grp"><div class="hint" style="padding:0">First feature in the body — always the base solid.</div></div>`;
+      }
     }
 
     const pt = f.pattern || {type:"none"};
+    if (!isMod) {
     h += `<div class="grp"><div class="grp-t">Pattern</div><div class="pills">
       ${["none","linear","circular"].map(m =>
         `<button class="${pt.type===m?"on":""}" onclick="setPattern('type','${m}')">${m[0].toUpperCase()+m.slice(1)}</button>`).join("")}
@@ -600,6 +618,7 @@ function renderProps() {
       }
     }
     h += `</div>`;
+    }
     h += `<div class="grp"><button class="btn-wide" onclick="duplicateFeat()">Duplicate feature</button>
           <button class="btn-wide danger" onclick="deleteFeat('${body.id}','${f.id}')">Delete feature</button></div>`;
   } else {
@@ -717,6 +736,18 @@ function b64ToBuf(b64) {
   const bin = atob(b64), out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out.buffer;
+}
+function bufToB64(buf) {
+  // Chunked to avoid blowing the call stack on String.fromCharCode.apply
+  // for a large upload (a bare .apply(null, hugeArray) call is a classic
+  // "works on my 50KB test file, crashes on a real one" trap).
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
 }
 
 /* ================================================== GEOMETRY ============== */
@@ -1081,6 +1112,45 @@ async function generate() {
     status("Request failed: " + err.message, "err");
   } finally {
     btn.disabled = false;
+  }
+}
+async function previewStepFile(ev) {
+  // Read-only viewer path for an arbitrary .step file -- distinct from
+  // Import (which loads this app's own project JSON back into the editable
+  // feature tree). This never touches state/bodies; it just asks the
+  // server to tessellate the uploaded STEP and drops the mesh straight into
+  // the same WebGL viewport Generate already uses.
+  const file = ev.target.files[0]; if (!file) return;
+  ev.target.value = "";
+  if (!authToken) { document.getElementById("gate").style.display = "flex"; return; }
+  status("Converting " + file.name + " for preview…", "busy");
+  try {
+    const buf = await file.arrayBuffer();
+    const resp = await fetch("/api/preview-step", {
+      method: "POST",
+      headers: {"Authorization":"Bearer "+authToken, "Content-Type":"application/json"},
+      body: JSON.stringify({step_base64: bufToB64(buf)}),
+    });
+    if (resp.status === 401) {
+      sessionStorage.removeItem("cadmcp_token"); authToken = "";
+      document.getElementById("gate").style.display = "flex";
+      status("Token rejected.", "err"); return;
+    }
+    const data = await resp.json();
+    if (!data.ok) { status("Preview failed: " + (data.error || "unknown error"), "err"); return; }
+    const m = parseSTL(b64ToBuf(data.stl_base64));
+    generated = {
+      meshes: [{pos:m.pos, nrm:m.nrm, color:hexRgb("#9fb0aa"), alpha:1.0, sel:false, cut:false}],
+      bodies: [], assemblyStep: null,
+    };
+    uploadMeshes(generated.meshes);
+    fitView();
+    renderMeasure(); renderDownloads(); renderLegend();
+    const chip = document.getElementById("viewChip");
+    chip.className = "chip solid"; chip.textContent = "STEP preview (read-only)";
+    status("Previewing " + file.name + " — read-only, not part of the editable model.", "ok");
+  } catch (err) {
+    status("Preview failed: " + err.message, "err");
   }
 }
 function parseSTL(buf) {
